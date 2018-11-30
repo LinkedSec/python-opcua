@@ -4,7 +4,7 @@ Can be used on server side or to implement binary/https opc-ua servers
 """
 
 from datetime import datetime, timedelta
-from copy import copy, deepcopy
+from copy import copy
 import os
 import logging
 from threading import Lock
@@ -65,9 +65,9 @@ class InternalServer(object):
 
         self.load_standard_address_space(shelffile)
 
-        self.loop = utils.ThreadLoop()
+        self.loop = None
         self.asyncio_transports = []
-        self.subscription_service = SubscriptionService(self.loop, self.aspace)
+        self.subscription_service = SubscriptionService(self.aspace)
 
         self.history_manager = HistoryManager(self)
 
@@ -87,7 +87,7 @@ class InternalServer(object):
         ns_node.set_value(uries)
 
     def load_standard_address_space(self, shelffile=None):
-        if shelffile is not None and os.path.isfile(shelffile):
+        if (shelffile is not None) and (os.path.isfile(shelffile) or os.path.isfile(shelffile+".db")):
             # import address space from shelf
             self.aspace.load_aspace_shelf(shelffile)
         else:
@@ -113,7 +113,14 @@ class InternalServer(object):
         it.TargetNodeId = ua.NodeId(ua.ObjectIds.ObjectTypesFolder)
         it.TargetNodeClass = ua.NodeClass.Object
 
-        results = self.isession.add_references([it])
+        it2 = ua.AddReferencesItem()
+        it2.SourceNodeId = ua.NodeId(ua.ObjectIds.BaseDataType)
+        it2.ReferenceTypeId = ua.NodeId(ua.ObjectIds.Organizes)
+        it2.IsForward = False
+        it2.TargetNodeId = ua.NodeId(ua.ObjectIds.DataTypesFolder)
+        it2.TargetNodeClass = ua.NodeClass.Object
+
+        results = self.isession.add_references([it, it2])
  
     def load_address_space(self, path):
         """
@@ -131,7 +138,9 @@ class InternalServer(object):
         self.logger.info("starting internal server")
         for edp in self.endpoints:
             self._known_servers[edp.Server.ApplicationUri] = ServerDesc(edp.Server)
+        self.loop = utils.ThreadLoop()
         self.loop.start()
+        self.subscription_service.set_loop(self.loop)
         Node(self.isession, ua.NodeId(ua.ObjectIds.Server_ServerStatus_State)).set_value(0, ua.VariantType.Int32)
         Node(self.isession, ua.NodeId(ua.ObjectIds.Server_ServerStatus_StartTime)).set_value(datetime.utcnow())
         if not self.disabled_clock:
@@ -140,7 +149,10 @@ class InternalServer(object):
     def stop(self):
         self.logger.info("stopping internal server")
         self.isession.close_session()
-        self.loop.stop()
+        if self.loop:
+            self.loop.stop()
+            self.loop = None
+        self.subscription_service.set_loop(None)
         self.history_manager.stop()
 
     def _set_current_time(self):
@@ -250,6 +262,15 @@ class InternalServer(object):
         """
         self.server_callback_dispatcher.removeListener(event, handle)
 
+    def set_attribute_value(self, nodeid, datavalue, attr=ua.AttributeIds.Value):
+        """
+        directly write datavalue to the Attribute, bypasing some checks and structure creation
+        so it is a little faster
+        """
+        self.aspace.set_attribute_value(nodeid, ua.AttributeIds.Value, datavalue)
+
+
+
 
 class InternalSession(object):
     _counter = 10
@@ -318,18 +339,12 @@ class InternalSession(object):
 
     def read(self, params):
         results = self.iserver.attribute_service.read(params)
-        if self.external:
-            return results
-        return [deepcopy(dv) for dv in results]
+        return results
 
     def history_read(self, params):
         return self.iserver.history_manager.read_history(params)
 
     def write(self, params):
-        if not self.external:
-            # If session is internal we need to store a copy og object, not a reference,
-            # otherwise users may change it and we will not generate expected events
-            params.NodesToWrite = [deepcopy(ntw) for ntw in params.NodesToWrite]
         return self.iserver.attribute_service.write(params, self.user)
 
     def browse(self, params):
@@ -361,6 +376,9 @@ class InternalSession(object):
         with self._lock:
             self.subscriptions.append(result.SubscriptionId)
         return result
+
+    def modify_subscription(self, params, callback):
+        return self.subscription_service.modify_subscription(params, callback)
 
     def create_monitored_items(self, params):
         subscription_result = self.subscription_service.create_monitored_items(params)

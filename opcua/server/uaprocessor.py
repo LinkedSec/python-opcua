@@ -143,9 +143,12 @@ class UaProcessor(object):
 
         elif typeid == ua.NodeId(ua.ObjectIds.CloseSessionRequest_Encoding_DefaultBinary):
             self.logger.info("Close session request")
-            deletesubs = ua.ua_binary.Primitives.Boolean.unpack(body)
 
-            self.session.close_session(deletesubs)
+            if self.session:
+                deletesubs = ua.ua_binary.Primitives.Boolean.unpack(body)
+                self.session.close_session(deletesubs)
+            else:
+                self.logger.info("Request to close non-existing session")
 
             response = ua.CloseSessionResponse()
             self.logger.info("sending close session response")
@@ -327,6 +330,18 @@ class UaProcessor(object):
             response.Parameters = result
 
             self.logger.info("sending create subscription response")
+            self.send_response(requesthdr.RequestHandle, algohdr, seqhdr, response)
+
+        elif typeid == ua.NodeId(ua.ObjectIds.ModifySubscriptionRequest_Encoding_DefaultBinary):
+            self.logger.info("modify subscription request")
+            params = struct_from_binary(ua.ModifySubscriptionParameters, body)
+
+            result = self.session.modify_subscription(params, self.forward_publish_response)
+
+            response = ua.ModifySubscriptionResponse()
+            response.Parameters = result
+
+            self.logger.info("sending modify subscription response")
             self.send_response(requesthdr.RequestHandle, algohdr, seqhdr, response)
 
         elif typeid == ua.NodeId(ua.ObjectIds.DeleteSubscriptionsRequest_Encoding_DefaultBinary):

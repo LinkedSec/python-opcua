@@ -1,5 +1,6 @@
 from __future__ import division  # support for python2
 from threading import Thread, Condition
+import concurrent.futures
 import logging
 try:
     from urllib.parse import urlparse
@@ -16,7 +17,7 @@ from opcua.common.subscription import Subscription
 from opcua.common import utils
 from opcua.crypto import security_policies
 from opcua.common.shortcuts import Shortcuts
-from opcua.common.structures import load_type_definitions
+from opcua.common.structures import load_type_definitions, load_enums
 use_crypto = True
 try:
     from opcua.crypto import uacrypto
@@ -47,7 +48,7 @@ class KeepAlive(Thread):
 
         # some server support no timeout, but we do not trust them
         if self.timeout == 0:
-            self.timeout = 3600000 # 1 hour
+            self.timeout = 3600000  # 1 hour
 
     def run(self):
         self.logger.debug("starting keepalive thread with period of %s milliseconds", self.timeout)
@@ -58,7 +59,11 @@ class KeepAlive(Thread):
             if self._dostop:
                 break
             self.logger.debug("renewing channel")
-            self.client.open_secure_channel(renew=True)
+            try:
+                self.client.open_secure_channel(renew=True)
+            except concurrent.futures.TimeoutError:
+                self.logger.debug("keepalive failed: timeout on open_secure_channel()")
+                break
             val = server_state.get_value()
             self.logger.debug("server state is: %s ", val)
         self.logger.debug("keepalive thread has stopped")
@@ -95,17 +100,17 @@ class Client(object):
         """
         self.logger = logging.getLogger(__name__)
         self.server_url = urlparse(url)
-        #take initial username and password from the url
+        # take initial username and password from the url
         self._username = self.server_url.username
         self._password = self.server_url.password
         self.name = "Pure Python Client"
         self.description = self.name
         self.application_uri = "urn:freeopcua:client"
-        self.product_uri = "urn:freeopcua.github.no:client"
+        self.product_uri = "urn:freeopcua.github.io:client"
         self.security_policy = ua.SecurityPolicy()
         self.secure_channel_id = None
-        self.secure_channel_timeout = 3600000 # 1 hour
-        self.session_timeout = 3600000 # 1 hour
+        self.secure_channel_timeout = 3600000  # 1 hour
+        self.session_timeout = 3600000  # 1 hour
         self._policy_ids = []
         self.uaclient = UaClient(timeout)
         self.user_certificate = None
@@ -114,9 +119,8 @@ class Client(object):
         self._session_counter = 1
         self.keepalive = None
         self.nodes = Shortcuts(self.uaclient)
-        self.max_messagesize = 0 # No limits
-        self.max_chunkcount = 0 # No limits
-
+        self.max_messagesize = 0  # No limits
+        self.max_chunkcount = 0  # No limits
 
     def __enter__(self):
         self.connect()
@@ -149,7 +153,7 @@ class Client(object):
         Set user password for the connection.
         initial password from the URL will be overwritten
         """
-        self._password = pwd   
+        self._password = pwd
 
     def set_security_string(self, string):
         """
@@ -254,8 +258,8 @@ class Client(object):
             self.send_hello()
             self.open_secure_channel()
             self.create_session()
-        except:
-            self.disconnect_socket() # clean up open socket
+        except Exception:
+            self.disconnect_socket()  # clean up open socket
             raise
         self.activate_session(username=self._username, password=self._password, certificate=self.user_certificate)
 
@@ -297,8 +301,9 @@ class Client(object):
             params.RequestType = ua.SecurityTokenRequestType.Renew
         params.SecurityMode = self.security_policy.Mode
         params.RequestedLifetime = self.secure_channel_timeout
-        nonce = utils.create_nonce(self.security_policy.symmetric_key_size)   # length should be equal to the length of key of symmetric encryption
-        params.ClientNonce = nonce	# this nonce is used to create a symmetric key
+        # length should be equal to the length of key of symmetric encryption
+        nonce = utils.create_nonce(self.security_policy.symmetric_key_size)
+        params.ClientNonce = nonce  # this nonce is used to create a symmetric key
         result = self.uaclient.open_secure_channel(params)
         self.security_policy.make_symmetric_key(nonce, result.ServerNonce)
         self.secure_channel_timeout = result.SecurityToken.RevisedLifetime
@@ -361,7 +366,8 @@ class Client(object):
         desc.ApplicationType = ua.ApplicationType.Client
 
         params = ua.CreateSessionParameters()
-        nonce = utils.create_nonce(32)  # at least 32 random bytes for server to prove possession of private key (specs part 4, 5.6.2.2)
+        # at least 32 random bytes for server to prove possession of private key (specs part 4, 5.6.2.2)
+        nonce = utils.create_nonce(32)
         params.ClientNonce = nonce
         params.ClientCertificate = self.security_policy.client_certificate
         params.ClientDescription = desc
@@ -384,7 +390,8 @@ class Client(object):
         ep = Client.find_endpoint(response.ServerEndpoints, self.security_policy.Mode, self.security_policy.URI)
         self._policy_ids = ep.UserIdentityTokens
         self.session_timeout = response.RevisedSessionTimeout
-        self.keepalive = KeepAlive(self, min(self.session_timeout, self.secure_channel_timeout) * 0.7)  # 0.7 is from spec
+        self.keepalive = KeepAlive(
+            self, min(self.session_timeout, self.secure_channel_timeout) * 0.7)  # 0.7 is from spec
         self.keepalive.start()
         return response
 
@@ -458,13 +465,13 @@ class Client(object):
             # and EncryptionAlgorithm is null
             if self._password:
                 self.logger.warning("Sending plain-text password")
-                params.UserIdentityToken.Password = password
+                params.UserIdentityToken.Password = password.encode('utf8')
             params.UserIdentityToken.EncryptionAlgorithm = None
         elif self._password:
             data, uri = self._encrypt_password(password, policy_uri)
             params.UserIdentityToken.Password = data
             params.UserIdentityToken.EncryptionAlgorithm = uri
-        params.UserIdentityToken.PolicyId = self.server_policy_id(ua.UserTokenType.UserName, b"username_basic256")
+        params.UserIdentityToken.PolicyId = self.server_policy_id(ua.UserTokenType.UserName, "username_basic256")
 
     def _encrypt_password(self, password, policy_uri):
         pubkey = uacrypto.x509_from_der(self.security_policy.server_certificate).public_key()
@@ -481,8 +488,9 @@ class Client(object):
         """
         Close session
         """
-        if self.keepalive:
+        if self.keepalive and self.keepalive.is_alive():
             self.keepalive.stop()
+            self.keepalive.join()
         return self.uaclient.close_session(True)
 
     def get_root_node(self):
@@ -538,12 +546,12 @@ class Client(object):
     def delete_nodes(self, nodes, recursive=False):
         return delete_nodes(self.uaclient, nodes, recursive)
 
-    def import_xml(self, path):
+    def import_xml(self, path=None, xmlstring=None):
         """
         Import nodes defined in xml
         """
         importer = XmlImporter(self)
-        return importer.import_xml(path)
+        return importer.import_xml(path, xmlstring)
 
     def export_xml(self, nodes, path):
         """
@@ -567,6 +575,16 @@ class Client(object):
         return len(uries) - 1
 
     def load_type_definitions(self, nodes=None):
+        """
+        Load custom types (custom structures/extension objects) definition from server
+        Generate Python classes for custom structures/extension objects defined in server
+        These classes will available in ua module
+        """
         return load_type_definitions(self, nodes)
 
-
+    def load_enums(self):
+        """
+        generate Python enums for custom enums on server.
+        This enums will be available in ua module
+        """
+        return load_enums(self)

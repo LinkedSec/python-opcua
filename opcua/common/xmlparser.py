@@ -89,13 +89,16 @@ class ExtObj(object):
 
 class XMLParser(object):
 
-    def __init__(self, xmlpath):
+    def __init__(self, xmlpath=None, xmlstring=None):
         self.logger = logging.getLogger(__name__)
         self._retag = re.compile(r"(\{.*\})(.*)")
         self.path = xmlpath
 
-        self.tree = ET.parse(xmlpath)
-        self.root = self.tree.getroot()
+        if xmlstring:
+            self.root = ET.fromstring(xmlstring)
+        else:
+            self.root = ET.parse(xmlpath).getroot()
+
         # FIXME: hard to get these xml namespaces with ElementTree, we may have to shift to lxml
         self.ns = {
             'base': "http://opcfoundation.org/UA/2011/03/UANodeSet.xsd",
@@ -328,6 +331,8 @@ class XMLParser(object):
         return body
 
     def _parse_refs(self, el, obj):
+        parent, parentlink = obj.parent, None
+
         for ref in el:
             struct = RefStruct()
             struct.forward = "IsForward" not in ref.attrib or ref.attrib["IsForward"] not in ("false", "False")
@@ -338,7 +343,10 @@ class XMLParser(object):
             if ref.attrib["ReferenceType"] == "HasTypeDefinition":
                 obj.typedef = ref.text
             elif not struct.forward:
-                if not obj.parent:
-                    obj.parent = ref.text
-                if obj.parent == ref.text:
-                    obj.parentlink = ref.attrib["ReferenceType"]
+                parent, parentlink = struct.target, struct.reftype
+                if obj.parent == parent:
+                    obj.parentlink = parentlink
+
+        if not obj.parent or not obj.parentlink:
+            obj.parent, obj.parentlink = parent, parentlink
+            self.logger.info("Could not detect backward reference to parent for node '%s'", obj.nodeid)
