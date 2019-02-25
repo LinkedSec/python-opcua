@@ -2,9 +2,8 @@
 Internal server implementing opcu-ua interface.
 Can be used on server side or to implement binary/https opc-ua servers
 """
-
 from datetime import datetime, timedelta
-from copy import copy, deepcopy
+from copy import copy
 import os
 import logging
 from threading import Lock
@@ -27,8 +26,9 @@ from opcua.server.address_space import ViewService
 from opcua.server.address_space import NodeManagementService
 from opcua.server.address_space import MethodService
 from opcua.server.subscription_service import SubscriptionService
+from opcua.server.discovery_service import LocalDiscoveryService
 from opcua.server.standard_address_space import standard_address_space
-from opcua.server.users import User
+from opcua.server.user_manager import UserManager
 #from opcua.common import xmlimporter
 
 
@@ -37,25 +37,18 @@ class SessionState(Enum):
     Activated = 1
     Closed = 2
 
-
-class ServerDesc(object):
-    def __init__(self, serv, cap=None):
-        self.Server = serv
-        self.Capabilities = cap
-
-
 class InternalServer(object):
 
-    def __init__(self, shelffile=None):
+    def __init__(self, shelffile=None, parent=None):
         self.logger = logging.getLogger(__name__)
 
+        self._parent = parent
         self.server_callback_dispatcher = CallbackDispatcher()
 
         self.endpoints = []
         self._channel_id_counter = 5
-        self.allow_remote_admin = True
         self.disabled_clock = False  # for debugging we may want to disable clock that writes too much in log
-        self._known_servers = {}  # used if we are a discovery server
+        self._local_discovery_service = None # lazy-loading
 
         self.aspace = AddressSpace()
         self.attribute_service = AttributeService(self.aspace)
@@ -65,18 +58,38 @@ class InternalServer(object):
 
         self.load_standard_address_space(shelffile)
 
-        self.loop = utils.ThreadLoop()
+        self.loop = None
         self.asyncio_transports = []
-        self.subscription_service = SubscriptionService(self.loop, self.aspace)
+        self.subscription_service = SubscriptionService(self.aspace)
 
         self.history_manager = HistoryManager(self)
 
         # create a session to use on server side
-        self.isession = InternalSession(self, self.aspace, self.subscription_service, "Internal", user=User.Admin)
+        self.isession = InternalSession(self, self.aspace, \
+          self.subscription_service, "Internal", user=UserManager.User.Admin)
 
         self.current_time_node = Node(self.isession, ua.NodeId(ua.ObjectIds.Server_ServerStatus_CurrentTime))
         self._address_space_fixes()
         self.setup_nodes()
+
+    @property
+    def user_manager(self):
+        return self._parent.user_manager
+
+    @property
+    def thread_loop(self):
+        if self.loop is None:
+            raise Exception("InternalServer stopped: async threadloop is not running.")
+        return self.loop
+
+    @property
+    def local_discovery_service(self):
+        if self._local_discovery_service is None:
+            self._local_discovery_service = LocalDiscoveryService(parent = self)
+            for edp in self.endpoints:
+                srvDesc = LocalDiscoveryService.ServerDescription(edp.Server)
+                self._local_discovery_service.add_server_description(srvDesc)
+        return self._local_discovery_service
 
     def setup_nodes(self):
         """
@@ -87,7 +100,7 @@ class InternalServer(object):
         ns_node.set_value(uries)
 
     def load_standard_address_space(self, shelffile=None):
-        if shelffile is not None and os.path.isfile(shelffile):
+        if (shelffile is not None) and (os.path.isfile(shelffile) or os.path.isfile(shelffile+".db")):
             # import address space from shelf
             self.aspace.load_aspace_shelf(shelffile)
         else:
@@ -113,7 +126,14 @@ class InternalServer(object):
         it.TargetNodeId = ua.NodeId(ua.ObjectIds.ObjectTypesFolder)
         it.TargetNodeClass = ua.NodeClass.Object
 
-        results = self.isession.add_references([it])
+        it2 = ua.AddReferencesItem()
+        it2.SourceNodeId = ua.NodeId(ua.ObjectIds.BaseDataType)
+        it2.ReferenceTypeId = ua.NodeId(ua.ObjectIds.Organizes)
+        it2.IsForward = False
+        it2.TargetNodeId = ua.NodeId(ua.ObjectIds.DataTypesFolder)
+        it2.TargetNodeClass = ua.NodeClass.Object
+
+        results = self.isession.add_references([it, it2])
  
     def load_address_space(self, path):
         """
@@ -129,9 +149,9 @@ class InternalServer(object):
 
     def start(self):
         self.logger.info("starting internal server")
-        for edp in self.endpoints:
-            self._known_servers[edp.Server.ApplicationUri] = ServerDesc(edp.Server)
+        self.loop = utils.ThreadLoop()
         self.loop.start()
+        self.subscription_service.set_loop(self.loop)
         Node(self.isession, ua.NodeId(ua.ObjectIds.Server_ServerStatus_State)).set_value(0, ua.VariantType.Int32)
         Node(self.isession, ua.NodeId(ua.ObjectIds.Server_ServerStatus_StartTime)).set_value(datetime.utcnow())
         if not self.disabled_clock:
@@ -140,8 +160,14 @@ class InternalServer(object):
     def stop(self):
         self.logger.info("stopping internal server")
         self.isession.close_session()
-        self.loop.stop()
+        if self.loop:
+            self.loop.stop()
+            self.loop = None
+        self.subscription_service.set_loop(None)
         self.history_manager.stop()
+
+    def is_running(self):
+        return self.loop is not None
 
     def _set_current_time(self):
         self.current_time_node.set_value(datetime.utcnow())
@@ -168,35 +194,7 @@ class InternalServer(object):
             return edps
         return self.endpoints[:]
 
-    def find_servers(self, params):
-        if not params.ServerUris:
-            return [desc.Server for desc in self._known_servers.values()]
-        servers = []
-        for serv in self._known_servers.values():
-            serv_uri = serv.Server.ApplicationUri.split(":")
-            for uri in params.ServerUris:
-                uri = uri.split(":")
-                if serv_uri[:len(uri)] == uri:
-                    servers.append(serv.Server)
-                    break
-        return servers
-
-    def register_server(self, server, conf=None):
-        appdesc = ua.ApplicationDescription()
-        appdesc.ApplicationUri = server.ServerUri
-        appdesc.ProductUri = server.ProductUri
-        # FIXME: select name from client locale
-        appdesc.ApplicationName = server.ServerNames[0]
-        appdesc.ApplicationType = server.ServerType
-        appdesc.DiscoveryUrls = server.DiscoveryUrls
-        # FIXME: select discovery uri using reachability from client network
-        appdesc.GatewayServerUri = server.GatewayServerUri
-        self._known_servers[server.ServerUri] = ServerDesc(appdesc, conf)
-
-    def register_server2(self, params):
-        return self.register_server(params.Server, params.DiscoveryConfiguration)
-
-    def create_session(self, name, user=User.Anonymous, external=False):
+    def create_session(self, name, user=UserManager.User.Anonymous, external=False):
         return InternalSession(self, self.aspace, self.subscription_service, name, user=user, external=external)
 
     def enable_history_data_change(self, node, period=timedelta(days=7), count=0):
@@ -250,12 +248,19 @@ class InternalServer(object):
         """
         self.server_callback_dispatcher.removeListener(event, handle)
 
+    def set_attribute_value(self, nodeid, datavalue, attr=ua.AttributeIds.Value):
+        """
+        directly write datavalue to the Attribute, bypasing some checks and structure creation
+        so it is a little faster
+        """
+        self.aspace.set_attribute_value(nodeid, ua.AttributeIds.Value, datavalue)
+
 
 class InternalSession(object):
     _counter = 10
     _auth_counter = 1000
 
-    def __init__(self, internal_server, aspace, submgr, name, user=User.Anonymous, external=False):
+    def __init__(self, internal_server, aspace, submgr, name, user=UserManager.User.Anonymous, external=False):
         self.logger = logging.getLogger(__name__)
         self.iserver = internal_server
         self.external = external  # define if session is external, we need to copy some objects if it is internal
@@ -272,6 +277,10 @@ class InternalSession(object):
         self.subscriptions = []
         self.logger.info("Created internal session %s", self.name)
         self._lock = Lock()
+
+    @property
+    def user_manager(self):
+        return self.iserver.user_manager
 
     def __str__(self):
         return "InternalSession(name:{0}, user:{1}, id:{2}, auth_token:{3})".format(
@@ -311,25 +320,19 @@ class InternalSession(object):
         self.state = SessionState.Activated
         id_token = params.UserIdentityToken
         if isinstance(id_token, ua.UserNameIdentityToken):
-            if self.iserver.allow_remote_admin and id_token.UserName in ("admin", "Admin"):
-                self.user = User.Admin
+            if self.user_manager.check_user_token(self, id_token) == False:
+                raise utils.ServiceError(ua.StatusCodes.BadUserAccessDenied)
         self.logger.info("Activated internal session %s for user %s", self.name, self.user)
         return result
 
     def read(self, params):
         results = self.iserver.attribute_service.read(params)
-        if self.external:
-            return results
-        return [deepcopy(dv) for dv in results]
+        return results
 
     def history_read(self, params):
         return self.iserver.history_manager.read_history(params)
 
     def write(self, params):
-        if not self.external:
-            # If session is internal we need to store a copy og object, not a reference,
-            # otherwise users may change it and we will not generate expected events
-            params.NodesToWrite = [deepcopy(ntw) for ntw in params.NodesToWrite]
         return self.iserver.attribute_service.write(params, self.user)
 
     def browse(self, params):
@@ -361,6 +364,9 @@ class InternalSession(object):
         with self._lock:
             self.subscriptions.append(result.SubscriptionId)
         return result
+
+    def modify_subscription(self, params, callback):
+        return self.subscription_service.modify_subscription(params, callback)
 
     def create_monitored_items(self, params):
         subscription_result = self.subscription_service.create_monitored_items(params)

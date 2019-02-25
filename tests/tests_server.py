@@ -2,6 +2,7 @@ import unittest
 import os
 import shelve
 import time
+from enum import Enum, EnumMeta
 
 from tests_common import CommonTests, add_server_methods
 from tests_xml import XmlTests
@@ -16,6 +17,7 @@ from opcua import ua
 from opcua import uamethod
 from opcua.common.event_objects import BaseEvent, AuditEvent, AuditChannelEvent, AuditSecurityEvent, AuditOpenSecureChannelEvent
 from opcua.common import ua_utils
+from opcua.server.registration_service import RegistrationService
 
 
 port_num = 48540
@@ -52,12 +54,13 @@ class TestServer(unittest.TestCase, CommonTests, SubscriptionTests, XmlTests):
             servers = client.find_servers()
             new_app_uri = "urn:freeopcua:python:server:test_discovery"
             self.srv.application_uri = new_app_uri
-            self.srv.register_to_discovery(self.discovery.endpoint.geturl(), 0)
-            time.sleep(0.1)  # let server register registration
-            new_servers = client.find_servers()
-            self.assertEqual(len(new_servers) - len(servers) , 1)
-            self.assertFalse(new_app_uri in [s.ApplicationUri for s in servers])
-            self.assertTrue(new_app_uri in [s.ApplicationUri for s in new_servers])
+            with RegistrationService() as regService:
+                regService.register_to_discovery(self.srv, self.discovery.endpoint.geturl(), period=0)
+                time.sleep(0.1)  # let server register registration
+                new_servers = client.find_servers()
+                self.assertEqual(len(new_servers) - len(servers) , 1)
+                self.assertFalse(new_app_uri in [s.ApplicationUri for s in servers])
+                self.assertTrue(new_app_uri in [s.ApplicationUri for s in new_servers])
         finally:
             client.disconnect()
 
@@ -66,29 +69,34 @@ class TestServer(unittest.TestCase, CommonTests, SubscriptionTests, XmlTests):
         client.connect()
         try:
             servers = client.find_servers()
-            new_app_uri1 = "urn:freeopcua:python:server:test_discovery1"
-            self.srv.application_uri = new_app_uri1
-            self.srv.register_to_discovery(self.discovery.endpoint.geturl(), period=0)
-            new_app_uri2 = "urn:freeopcua:python:test_discovery2"
-            self.srv.application_uri = new_app_uri2
-            self.srv.register_to_discovery(self.discovery.endpoint.geturl(), period=0)
-            time.sleep(0.1)  # let server register registration
-            new_servers = client.find_servers()
-            self.assertEqual(len(new_servers) - len(servers) , 2)
-            self.assertFalse(new_app_uri1 in [s.ApplicationUri for s in servers])
-            self.assertFalse(new_app_uri2 in [s.ApplicationUri for s in servers])
-            self.assertTrue(new_app_uri1 in [s.ApplicationUri for s in new_servers])
-            self.assertTrue(new_app_uri2 in [s.ApplicationUri for s in new_servers])
-            # now do a query with filer
-            new_servers = client.find_servers(["urn:freeopcua:python:server"])
-            self.assertEqual(len(new_servers) - len(servers) , 0)
-            self.assertTrue(new_app_uri1 in [s.ApplicationUri for s in new_servers])
-            self.assertFalse(new_app_uri2 in [s.ApplicationUri for s in new_servers])
-            # now do a query with filer
-            new_servers = client.find_servers(["urn:freeopcua:python"])
-            self.assertEqual(len(new_servers) - len(servers) , 2)
-            self.assertTrue(new_app_uri1 in [s.ApplicationUri for s in new_servers])
-            self.assertTrue(new_app_uri2 in [s.ApplicationUri for s in new_servers])
+            # Use 2 different RegistrationServices, as it does not allow duplicate registrations.
+            with RegistrationService() as regService1, RegistrationService() as regService2:
+                # Register to server with uri1
+                new_app_uri1 = "urn:freeopcua:python:server:test_discovery1"
+                self.srv.application_uri = new_app_uri1
+                regService1.register_to_discovery(self.srv, self.discovery.endpoint.geturl(), period=0)
+                # Register to server with uri2
+                new_app_uri2 = "urn:freeopcua:python:test_discovery2"
+                self.srv.application_uri = new_app_uri2
+                regService2.register_to_discovery(self.srv, self.discovery.endpoint.geturl(), period=0)
+                # Check for 2 registrations
+                time.sleep(0.1)  # let server register registration
+                new_servers = client.find_servers()
+                self.assertEqual(len(new_servers) - len(servers) , 2)
+                self.assertFalse(new_app_uri1 in [s.ApplicationUri for s in servers])
+                self.assertFalse(new_app_uri2 in [s.ApplicationUri for s in servers])
+                self.assertTrue(new_app_uri1 in [s.ApplicationUri for s in new_servers])
+                self.assertTrue(new_app_uri2 in [s.ApplicationUri for s in new_servers])
+                # now do a query with filter
+                new_servers = client.find_servers(["urn:freeopcua:python:server"])
+                self.assertEqual(len(new_servers) - len(servers) , 0)
+                self.assertTrue(new_app_uri1 in [s.ApplicationUri for s in new_servers])
+                self.assertFalse(new_app_uri2 in [s.ApplicationUri for s in new_servers])
+                # now do a query with filter
+                new_servers = client.find_servers(["urn:freeopcua:python"])
+                self.assertEqual(len(new_servers) - len(servers) , 2)
+                self.assertTrue(new_app_uri1 in [s.ApplicationUri for s in new_servers])
+                self.assertTrue(new_app_uri2 in [s.ApplicationUri for s in new_servers])
         finally:
             client.disconnect()
 
@@ -249,24 +257,24 @@ class TestServer(unittest.TestCase, CommonTests, SubscriptionTests, XmlTests):
         check_eventgenerator_SourceServer(self, evgen)
 
     def test_eventgenerator_sourceServer_Node(self):
-        evgen = self.opc.get_event_generator(source=opcua.Node(self.opc.iserver.isession, ua.NodeId(ua.ObjectIds.Server)))
+        evgen = self.opc.get_event_generator(emitting_node=opcua.Node(self.opc.iserver.isession, ua.NodeId(ua.ObjectIds.Server)))
         check_eventgenerator_BaseEvent(self, evgen)
         check_eventgenerator_SourceServer(self, evgen)
 
     def test_eventgenerator_sourceServer_NodeId(self):
-        evgen = self.opc.get_event_generator(source=ua.NodeId(ua.ObjectIds.Server))
+        evgen = self.opc.get_event_generator(emitting_node=ua.NodeId(ua.ObjectIds.Server))
         check_eventgenerator_BaseEvent(self, evgen)
         check_eventgenerator_SourceServer(self, evgen)
 
     def test_eventgenerator_sourceServer_ObjectIds(self):
-        evgen = self.opc.get_event_generator(source=ua.ObjectIds.Server)
+        evgen = self.opc.get_event_generator(emitting_node=ua.ObjectIds.Server)
         check_eventgenerator_BaseEvent(self, evgen)
         check_eventgenerator_SourceServer(self, evgen)
 
     def test_eventgenerator_sourceMyObject(self):
         objects = self.opc.get_objects_node()
         o = objects.add_object(3, 'MyObject')
-        evgen = self.opc.get_event_generator(source=o)
+        evgen = self.opc.get_event_generator(emitting_node=o)
         check_eventgenerator_BaseEvent(self, evgen)
         check_event_generator_object(self, evgen, o)
 
@@ -275,8 +283,10 @@ class TestServer(unittest.TestCase, CommonTests, SubscriptionTests, XmlTests):
         o = objects.add_object(3, 'MyObject')
         event = BaseEvent(sourcenode=o.nodeid)
         evgen = self.opc.get_event_generator(event, ua.ObjectIds.Server)
+        evgen.event.SourceNode = o.nodeid
+        evgen.event.SourceName = o.get_browse_name().Name
         check_eventgenerator_BaseEvent(self, evgen)
-        check_event_generator_object(self, evgen, o)
+        check_event_generator_object(self, evgen, o, emitting_node=opcua.Node(self.opc.iserver.isession, ua.ObjectIds.Server))
 
     def test_eventgenerator_InheritedEvent(self):
         evgen = self.opc.get_event_generator(ua.ObjectIds.AuditEventType)
@@ -480,6 +490,38 @@ class TestServer(unittest.TestCase, CommonTests, SubscriptionTests, XmlTests):
 
         self.assertRaises(ValueError, ua_utils.get_nodes_of_namespace, self.opc, namespaces='non_existing_ns')
 
+    def test_load_enum_strings(self):
+        dt = self.opc.nodes.enum_data_type.add_data_type(0, "MyStringEnum")
+        dt.add_variable(0, "EnumStrings", [ua.LocalizedText("e1"), ua.LocalizedText("e2"), ua.LocalizedText("e3"), ua.LocalizedText("e 4")])
+        self.opc.load_enums()
+        e = getattr(ua, "MyStringEnum")
+        self.assertIsInstance(e, EnumMeta)
+        self.assertTrue(hasattr(e, "e1"))
+        self.assertTrue(hasattr(e, "e4"))
+        self.assertEqual(getattr(e, "e4"), 3)
+
+    def test_load_enum_values(self):
+        dt = self.opc.nodes.enum_data_type.add_data_type(0, "MyValuesEnum")
+        v1 = ua.EnumValueType()
+        v1.DisplayName.Text = "v1"
+        v1.Value = 2
+        v2 = ua.EnumValueType()
+        v2.DisplayName.Text = "v2"
+        v2.Value = 3
+        v3 = ua.EnumValueType()
+        v3.DisplayName.Text = "v 3 "
+        v3.Value = 4
+        dt.add_variable(0, "EnumValues", [v1, v2, v3])
+        self.opc.load_enums()
+        e = getattr(ua, "MyValuesEnum")
+        self.assertIsInstance(e, EnumMeta)
+        self.assertTrue(hasattr(e, "v1"))
+        self.assertTrue(hasattr(e, "v3"))
+        self.assertEqual(getattr(e, "v3"), 4)
+
+
+
+
 def check_eventgenerator_SourceServer(test, evgen):
     server = test.opc.get_server_node()
     test.assertEqual(evgen.event.SourceName, server.get_browse_name().Name)
@@ -490,14 +532,17 @@ def check_eventgenerator_SourceServer(test, evgen):
     test.assertGreaterEqual(len(refs), 1)
 
 
-def check_event_generator_object(test, evgen, obj):
+def check_event_generator_object(test, evgen, obj, emitting_node=None):
     test.assertEqual(evgen.event.SourceName, obj.get_browse_name().Name)
     test.assertEqual(evgen.event.SourceNode, obj.nodeid)
-    test.assertEqual(obj.get_event_notifier(), {ua.EventNotifier.SubscribeToEvents})
+    if not emitting_node:
+        test.assertEqual(obj.get_event_notifier(), {ua.EventNotifier.SubscribeToEvents})
+        refs = obj.get_referenced_nodes(ua.ObjectIds.GeneratesEvent, ua.BrowseDirection.Forward, ua.NodeClass.ObjectType, False)
+    else:
+        test.assertEqual(emitting_node.get_event_notifier(), {ua.EventNotifier.SubscribeToEvents})
+        refs = emitting_node.get_referenced_nodes(ua.ObjectIds.GeneratesEvent, ua.BrowseDirection.Forward, ua.NodeClass.ObjectType, False)
 
-    refs = obj.get_referenced_nodes(ua.ObjectIds.GeneratesEvent, ua.BrowseDirection.Forward, ua.NodeClass.ObjectType, False)
-    test.assertEqual(len(refs), 1)
-    test.assertEqual(refs[0].nodeid, evgen.event.EventType)
+    test.assertIn(evgen.event.EventType, [x.nodeid for x in refs])
 
 
 def check_eventgenerator_BaseEvent(test, evgen):
@@ -561,6 +606,7 @@ class TestServerCaching(unittest.TestCase):
         self.assertEqual(server.get_node(id).get_value(), 123)
 
         os.remove(path)
+
 
 class TestServerStartError(unittest.TestCase):
 

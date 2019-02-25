@@ -44,6 +44,7 @@ if __name__ == "__main__":
     # client = Client("opc.tcp://admin@localhost:4840/freeopcua/server/") #connect using a user
     try:
         client.connect()
+        client.load_type_definitions()  # load definition of server specific structures/extension objects
 
         # Client has a few methods to get proxy to UA nodes that should always be in address space such as Root or Objects
         root = client.get_root_node()
@@ -63,9 +64,13 @@ if __name__ == "__main__":
         #var.set_value(ua.Variant([23], ua.VariantType.Int64)) #set node value using explicit data type
         #var.set_value(3.9) # set node value using implicit data type
 
+        # gettting our namespace idx
+        uri = "http://examples.freeopcua.github.io"
+        idx = client.get_namespace_index(uri)
+
         # Now getting a variable node using its browse path
-        myvar = root.get_child(["0:Objects", "2:MyObject", "2:MyVariable"])
-        obj = root.get_child(["0:Objects", "2:MyObject"])
+        myvar = root.get_child(["0:Objects", "{}:MyObject".format(idx), "{}:MyVariable".format(idx)])
+        obj = root.get_child(["0:Objects", "{}:MyObject".format(idx)])
         print("myvar is: ", myvar)
 
         # subscribing to a variable node
@@ -80,7 +85,7 @@ if __name__ == "__main__":
         # sub.delete()
 
         # calling a method on server
-        res = obj.call_method("2:multiply", 3, "klk")
+        res = obj.call_method("{}:multiply".format(idx), 3, "klk")
         print("method result is: ", res)
 
         embed()

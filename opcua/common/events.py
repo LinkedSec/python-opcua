@@ -19,17 +19,18 @@ class Event(object):
     add properties using the add_property method!!!
     """
 
-    def __init__(self):
+    def __init__(self, emitting_node=ua.ObjectIds.Server):
         self.server_handle = None
         self.select_clauses = None
         self.event_fields = None
         self.data_types = {}
+        self.emitting_node = emitting_node
         # save current attributes
         self.internal_properties = list(self.__dict__.keys())[:] + ["internal_properties"]
 
     def __str__(self):
         return "{0}({1})".format(
-            self.__class__.__name__, 
+            self.__class__.__name__,
             [str(k) + ":" + str(v) for k, v in self.__dict__.items() if k not in self.internal_properties])
     __repr__ = __str__
 
@@ -63,7 +64,7 @@ class Event(object):
     def to_event_fields_using_subscription_fields(self, select_clauses):
         """
         Using a new select_clauses and the original select_clauses
-        used during subscription, return a field list 
+        used during subscription, return a field list
         """
         fields = []
         for sattr in select_clauses:
@@ -134,7 +135,7 @@ def select_clauses_from_evtype(evtypes):
 def where_clause_from_evtype(evtypes):
     cf = ua.ContentFilter()
     el = ua.ContentFilterElement()
-    
+
     # operands can be ElementOperand, LiteralOperand, AttributeOperand, SimpleAttribute
     # Create a clause where the generate event type property EventType
     # must be a subtype of events in evtypes argument

@@ -81,14 +81,12 @@ class _FrozenClass(object):
         object.__setattr__(self, key, value)
 
 
-if "PYOPCUA_NO_TYPO_CHECK" in os.environ:
+if "PYOPCUA_TYPO_CHECK" in os.environ:
     # typo check is cpu consuming, but it will make debug easy.
-    # if typo check is not need (in production), please set env PYOPCUA_NO_TYPO_CHECK.
-    # this will make all uatype class inherit from object intead of _FrozenClass
-    # and skip the typo check.
-    FrozenClass = object
-else:
+    # set PYOPCUA_TYPO_CHECK will make all uatype classes inherit from _FrozenClass
     FrozenClass = _FrozenClass
+else:
+    FrozenClass = object
 
 
 class ValueRank(IntEnum):
@@ -265,7 +263,7 @@ class NodeIdType(IntEnum):
     ByteString = 5
 
 
-class NodeId(FrozenClass):
+class NodeId(object):
     """
     NodeId Object
 
@@ -293,8 +291,6 @@ class NodeId(FrozenClass):
         self.NamespaceUri = ""
         self.ServerIndex = 0
         self._freeze = True
-        if not isinstance(self.NamespaceIndex, int):
-            raise UaError("NamespaceIndex must be an int")
         if self.Identifier is None:
             self.Identifier = 0
             self.NodeIdType = NodeIdType.TwoByte
@@ -311,25 +307,19 @@ class NodeId(FrozenClass):
             else:
                 raise UaError("NodeId: Could not guess type of NodeId, set NodeIdType")
 
-    def _key(self):
-        if self.NodeIdType in (NodeIdType.TwoByte, NodeIdType.FourByte, NodeIdType.Numeric):
-            # twobyte, fourbyte and numeric may represent the same node
-            return (NodeIdType.Numeric, self.NamespaceIndex, self.Identifier)
-        return (self.NodeIdType, self.NamespaceIndex, self.Identifier)
-
     def __eq__(self, node):
-        return isinstance(node, NodeId) and self._key() == node._key()
+        return isinstance(node, NodeId) and self.NamespaceIndex == node.NamespaceIndex and self.Identifier == node.Identifier
 
     def __ne__(self, other):
         return not self.__eq__(other)
 
     def __hash__(self):
-        return hash(self._key())
+        return hash((self.NamespaceIndex, self.Identifier))
 
     def __lt__(self, other):
         if not isinstance(other, NodeId):
             raise AttributeError("Can only compare to NodeId")
-        return self._key() < other._key()
+        return (self.NodeIdType, self.NamespaceIndex, self.Identifier) < (other.NodeIdType, other.NamespaceIndex, other.Identifier)
 
     def is_null(self):
         if self.NamespaceIndex != 0:
@@ -527,13 +517,23 @@ class LocalizedText(FrozenClass):
 
     def __init__(self, text=None):
         self.Encoding = 0
-        if text is not None and not isinstance(text, str):
-            raise ValueError("A LocalizedText object takes a string as argument, not a {}, {}".format(text, type(text)))
-        self.Text = text
-        if self.Text:
-            self.Encoding |= (1 << 1)
+        self._text = None
+        if text:
+            self.Text = text
         self.Locale = None
         self._freeze = True
+
+    @property
+    def Text(self):
+        return self._text
+
+    @Text.setter
+    def Text(self, text):
+        if not isinstance(text, str):
+            raise ValueError("A LocalizedText object takes a string as argument, not a {}, {}".format(type(text), text))
+        self._text = text
+        if self._text:
+            self.Encoding |= (1 << 1)
 
     def to_string(self):
         # FIXME: use local
@@ -696,28 +696,62 @@ class Variant(FrozenClass):
     """
 
     def __init__(self, value=None, varianttype=None, dimensions=None, is_array=None):
-        self.Value = value
-        self.VariantType = varianttype
-        self.Dimensions = dimensions
-        self.is_array = is_array
-        if self.is_array is None:
-            if isinstance(value, (list, tuple)):
-                self.is_array = True
-            else:
-                self.is_array = False
-        self._freeze = True
+        self._freeze = False # defers validation until ready.
+        # Value, VariantType
+        self._value = None
+        self._variantType = None
         if isinstance(value, Variant):
             self.Value = value.Value
             self.VariantType = value.VariantType
-        if self.VariantType is None:
-            self.VariantType = self._guess_type(self.Value)
-        if self.Value is None and not self.is_array and self.VariantType not in (VariantType.Null, VariantType.String,
-                                                                                 VariantType.DateTime):
-            raise UaError("Non array Variant of type {0} cannot have value None".format(self.VariantType))
-        if self.Dimensions is None and isinstance(self.Value, (list, tuple)):
+        else:
+            self.Value = value
+            self.VariantType = varianttype
+        # Dimensions
+        self.Dimensions = dimensions
+        if dimensions is None and isinstance(self.Value, (list, tuple)):
             dims = get_shape(self.Value)
             if len(dims) > 1:
                 self.Dimensions = dims
+        # is_array
+        if is_array is not None:
+            self.is_array = bool(is_array)
+        else:
+            self.is_array = isinstance(self.Value, (list, tuple))
+        # Validation check
+        self._freeze = True
+        self._validate()
+
+    @property
+    def Value(self):
+        return self._value
+
+    @Value.setter
+    def Value(self, value):
+        if not (self._value is None or isinstance(value, type(self._value))):
+            logger.warning("Datatype changed from {} to {} in Variant {}.".format(type(self._value), type(value), self))
+        self._value = value
+        self._validate()
+
+    @property
+    def VariantType(self):
+        return self._variantType
+
+    @VariantType.setter
+    def VariantType(self, variantType):
+        if variantType is not None:
+            self._variantType = variantType
+        else:
+            self._variantType = self._guess_type(self.Value)
+        self._validate()
+
+    def _validate(self):
+        if self._freeze is False:
+            return
+        elif isinstance(self._value, int) and self.VariantType in (VariantType.Float, VariantType.Double):
+            self._value = float(self._value)
+        elif self._value is None and not self.is_array and \
+              self.VariantType not in (VariantType.Null, VariantType.String, VariantType.DateTime):
+            raise UaError("Non array Variant of type {0} cannot have value None".format(self.VariantType))
 
     def __eq__(self, other):
         if isinstance(other, Variant) and self.VariantType == other.VariantType and self.Value == other.Value:
@@ -766,9 +800,6 @@ class Variant(FrozenClass):
 
     __repr__ = __str__
 
-    def to_binary(self):
-        from opcua.ua.ua_binary import variant_to_binary
-        return variant_to_binary(self)
 
 
 def _split_list(l, n):
@@ -950,7 +981,7 @@ def register_extension_object(name, nodeid, class_type):
     """
     Register a new extension object for automatic decoding and make them available in ua module
     """
-    logger.warning("registring new extension object: %s %s %s", name, nodeid, class_type)
+    logger.info("registring new extension object: %s %s %s", name, nodeid, class_type)
     extension_object_classes[nodeid] = class_type
     extension_object_ids[name] = nodeid
     # FIXME: Next line is not exactly a Python best practices, so feel free to propose something else
@@ -967,3 +998,26 @@ def get_extensionobject_class_type(typeid):
         return extension_object_classes[typeid]
     else:
         return None
+
+
+class SecurityPolicyType(Enum):
+    """
+    The supported types of SecurityPolicy.
+    
+    "None"
+    "Basic128Rsa15_Sign"
+    "Basic128Rsa15_SignAndEncrypt"
+    "Basic256_Sign"
+    "Basic256_SignAndEncrypt"
+    "Basic256Sha256_Sign"
+    "Basic256Sha256_SignAndEncrypt"
+
+    """
+
+    NoSecurity = 0
+    Basic128Rsa15_Sign = 1
+    Basic128Rsa15_SignAndEncrypt = 2
+    Basic256_Sign = 3
+    Basic256_SignAndEncrypt = 4
+    Basic256Sha256_Sign = 5
+    Basic256Sha256_SignAndEncrypt = 6

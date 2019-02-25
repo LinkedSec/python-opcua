@@ -2,6 +2,7 @@
 from concurrent.futures import Future, TimeoutError
 import time
 from datetime import datetime, timedelta
+from copy import copy
 
 import opcua
 from opcua import ua
@@ -121,8 +122,9 @@ class SubscriptionTests(object):
         nb = 12
         for i in range(nb):
             val = var.get_value()
+            val = copy(val)  # we do not want to modify object in our db, we need a copy in order to generate event
             val.append(i)
-            var.set_value(val)
+            var.set_value(copy(val))
         time.sleep(0.2)  # let last event arrive
         self.assertEqual(myhandler.datachange_count, nb + 1)
         sub.delete()
@@ -149,6 +151,7 @@ class SubscriptionTests(object):
         sub.subscribe_data_change(var)
         while True:
             val = var.get_value()
+            val = copy(val)  # we do not want to modify object in our db, we need a copy in order to generate event
             val.pop()
             var.set_value(val, ua.VariantType.Double)
             if not val:
@@ -370,11 +373,13 @@ class SubscriptionTests(object):
     def test_events_MyObject(self):
         objects = self.srv.get_objects_node()
         o = objects.add_object(3, 'MyObject')
-        evgen = self.srv.get_event_generator(source=o)
+        evgen = self.srv.get_event_generator()
+        evgen.event.SourceNode=o.nodeid
+        evgen.event.SourceName=o.get_browse_name().Name
 
         myhandler = MySubHandler()
         sub = self.opc.create_subscription(100, myhandler)
-        handle = sub.subscribe_events(o)
+        handle = sub.subscribe_events()
 
         tid = datetime.utcnow()
         msg = "this is my msg "
@@ -396,7 +401,7 @@ class SubscriptionTests(object):
     def test_events_wrong_source(self):
         objects = self.srv.get_objects_node()
         o = objects.add_object(3, 'MyObject')
-        evgen = self.srv.get_event_generator(source=o)
+        evgen = self.srv.get_event_generator(emitting_node=o)
 
         myhandler = MySubHandler()
         sub = self.opc.create_subscription(100, myhandler)
@@ -419,7 +424,7 @@ class SubscriptionTests(object):
 
         myhandler = MySubHandler()
         sub = self.opc.create_subscription(100, myhandler)
-        handle = sub.subscribe_events(evtypes=etype)
+        handle = sub.subscribe_events(sourcenode=ua.ObjectIds.Server, evtypes=etype)
 
         propertynum = 2
         propertystring = "This is my test"
@@ -450,16 +455,18 @@ class SubscriptionTests(object):
         objects = self.srv.get_objects_node()
         o = objects.add_object(3, 'MyObject')
         etype = self.srv.create_custom_event_type(2, 'MyEvent', ua.ObjectIds.BaseEventType, [('PropertyNum', ua.VariantType.Float), ('PropertyString', ua.VariantType.String)])
-        evgen = self.srv.get_event_generator(etype, o)
+        evgen = self.srv.get_event_generator(etype, emitting_node=o)
+        evgen.event.SourceNode = o.nodeid
 
         myhandler = MySubHandler()
         sub = self.opc.create_subscription(100, myhandler)
-        handle = sub.subscribe_events(o, etype)
+        handle = sub.subscribe_events(sourcenode=o, evtypes=etype)
 
         propertynum = 2
         propertystring = "This is my test"
         evgen.event.PropertyNum = propertynum
         evgen.event.PropertyString = propertystring
+        evgen.event.SourceNode = o.nodeid
         tid = datetime.utcnow()
         msg = "this is my msg "
         evgen.trigger(tid, msg)
@@ -502,7 +509,7 @@ class SubscriptionTests(object):
         propertystring2 = "This is my test 2"
         evgen2.event.PropertyNum = propertynum2
         evgen2.event.PropertyString = propertystring2
-        
+
         for i in range(3):
             evgen1.trigger()
             evgen2.trigger()
@@ -560,7 +567,7 @@ class SubscriptionTests(object):
         propertystring3 = "This is my test 3"
         evgen3.event.PropertyNum3 = propertynum3
         evgen3.event.PropertyString = propertystring2
-        
+
         for i in range(3):
             evgen1.trigger()
             evgen2.trigger()

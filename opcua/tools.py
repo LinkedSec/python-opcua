@@ -18,6 +18,7 @@ from opcua import Client
 from opcua import Server
 from opcua import Node
 from opcua import uamethod
+from opcua.ua.uaerrors import UaStatusCodeError
 
 
 def add_minimum_args(parser):
@@ -59,8 +60,12 @@ def add_common_args(parser, default_node='i=84', require_node=False):
                         default=0,
                         metavar="NAMESPACE")
     parser.add_argument("--security",
-                        help="Security settings, for example: Basic256,SignAndEncrypt,cert.der,pk.pem[,server_cert.der]. Default: None",
+                        help="Security settings, for example: Basic256Sha256,SignAndEncrypt,cert.der,pk.pem[,server_cert.der]. Default: None",
                         default='')
+    parser.add_argument("--user",
+                        help="User name for authentication. Overrides the user name given in the URL.")
+    parser.add_argument("--password",
+                        help="Password name for authentication. Overrides the password given in the URL.")
 
 
 def _require_nodeid(parser, args):
@@ -114,6 +119,7 @@ def uaread():
     client = Client(args.url, timeout=args.timeout)
     client.set_security_string(args.security)
     client.connect()
+
     try:
         node = get_node(client, args)
         attr = node.get_attribute(args.attribute)
@@ -217,6 +223,14 @@ def _val_to_variant(val, args):
         return _arg_to_variant(val, array, ua.LocalizedText, ua.VariantType.LocalizedText)
 
 
+def _configure_client_with_args(client, args):
+    if args.user:
+        client.set_user(args.user)
+    if args.password:
+        client.set_password(args.password)
+    client.set_security_string(args.security)
+
+
 def uawrite():
     parser = argparse.ArgumentParser(description="Write attribute of a node, per default write value of node")
     add_common_args(parser)
@@ -245,7 +259,7 @@ def uawrite():
     args = parse_args(parser, requirenodeid=True)
 
     client = Client(args.url, timeout=args.timeout)
-    client.set_security_string(args.security)
+    _configure_client_with_args(client, args)
     client.connect()
     try:
         node = get_node(client, args)
@@ -277,7 +291,7 @@ def uals():
         args.long_format = 1
 
     client = Client(args.url, timeout=args.timeout)
-    client.set_security_string(args.security)
+    _configure_client_with_args(client, args)
     client.connect()
     try:
         node = get_node(client, args)
@@ -311,7 +325,10 @@ def _lsprint_1(node, depth, indent=""):
 
     for desc in node.get_children_descriptions():
         if desc.NodeClass == ua.NodeClass.Variable:
-            val = Node(node.server, desc.NodeId).get_value()
+            try:
+                val = Node(node.server, desc.NodeId).get_value()
+            except UaStatusCodeError as err:
+                val = "Bad (0x{0:x})".format(err.code)
             print("{0}{1:30} {2!s:25} {3!s:25}, {4!s:3}".format(indent, desc.DisplayName.to_string(), desc.NodeId.to_string(), desc.BrowseName.to_string(), val))
         else:
             print("{0}{1:30} {2!s:25} {3!s:25}".format(indent, desc.DisplayName.to_string(), desc.NodeId.to_string(), desc.BrowseName.to_string()))
@@ -369,7 +386,7 @@ def uasubscribe():
             args.nodeid = "i=2253"
 
     client = Client(args.url, timeout=args.timeout)
-    client.set_security_string(args.security)
+    _configure_client_with_args(client, args)
     client.connect()
     try:
         node = get_node(client, args)
@@ -452,7 +469,7 @@ def uaclient():
     args = parse_args(parser)
 
     client = Client(args.url, timeout=args.timeout)
-    client.set_security_string(args.security)
+    _configure_client_with_args(client, args)
     if args.certificate:
         client.load_client_certificate(args.certificate)
     if args.private_key:
@@ -635,7 +652,7 @@ def uahistoryread():
     args = parse_args(parser, requirenodeid=True)
 
     client = Client(args.url, timeout=args.timeout)
-    client.set_security_string(args.security)
+    _configure_client_with_args(client, args)
     client.connect()
     try:
         node = get_node(client, args)
@@ -662,6 +679,12 @@ def uacall():
                         type=int,
                         default=None,
                         help="Set method to call. If not given then (single) method of the selected node is used.")
+    parser.add_argument("-M",
+                        "--method-name",
+                        dest="method_name",
+                        type=str,
+                        default=None,
+                        help="Set name of method to call. Overrides --method")
     parser.add_argument("-l",
                         "--list",
                         "--array",
@@ -683,7 +706,7 @@ def uacall():
     args = parse_args(parser, requirenodeid=True)
 
     client = Client(args.url, timeout=args.timeout)
-    client.set_security_string(args.security)
+    _configure_client_with_args(client, args)
     client.connect()
     try:
         node = get_node(client, args)
@@ -698,7 +721,9 @@ def uacall():
         method_id = None
         #print( "methods=%s" % (methods) )
 
-        if ( args.method is None ):
+        if ( args.method_name is not None ):
+            method_id = args.method_name
+        elif ( args.method is None ):
             if ( len( methods ) == 0 ):
                 raise ValueError( "No methods in selected node and no method given" )
             elif ( len( methods ) == 1 ):
@@ -739,7 +764,7 @@ def uageneratestructs():
     args = parse_args(parser, requirenodeid=True)
 
     client = Client(args.url, timeout=args.timeout)
-    client.set_security_string(args.security)
+    _configure_client_with_args(client, args)
     client.connect()
     try:
         node = get_node(client, args)

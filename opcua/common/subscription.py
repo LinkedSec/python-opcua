@@ -87,11 +87,9 @@ class Subscription(object):
         self.subscription_id = None
         response = self.server.create_subscription(params, self.publish_callback)
         self.subscription_id = response.SubscriptionId  # move to data class
-
-        # Launching two publish requests is a heuristic. We try to ensure
-        # that the server always has at least one publish request in the queue,
-        # even after it just replied to a publish request.
-        self.server.publish()
+        
+        #Send a publish request so the server has one in its queue
+        # Servers should alsways be able to handle at least on extra publish request per subscriptions
         self.server.publish()
 
     def delete(self):
@@ -106,15 +104,18 @@ class Subscription(object):
         while self.subscription_id is None:
             time.sleep(0.01)
 
-        for notif in publishresult.NotificationMessage.NotificationData:
-            if isinstance(notif, ua.DataChangeNotification):
-                self._call_datachange(notif)
-            elif isinstance(notif, ua.EventNotificationList):
-                self._call_event(notif)
-            elif isinstance(notif, ua.StatusChangeNotification):
-                self._call_status(notif)
-            else:
-                self.logger.warning("Notification type not supported yet for notification %s", notif)
+        if publishresult.NotificationMessage.NotificationData is not None:
+            for notif in publishresult.NotificationMessage.NotificationData:
+                if isinstance(notif, ua.DataChangeNotification):
+                    self._call_datachange(notif)
+                elif isinstance(notif, ua.EventNotificationList):
+                    self._call_event(notif)
+                elif isinstance(notif, ua.StatusChangeNotification):
+                    self._call_status(notif)
+                else:
+                    self.logger.warning("Notification type not supported yet for notification %s", notif)
+        else:
+            self.logger.warning("NotificationMessage is None.")
 
         ack = ua.SubscriptionAcknowledgement()
         ack.SubscriptionId = self.subscription_id
@@ -168,14 +169,14 @@ class Subscription(object):
         except Exception:
             self.logger.exception("Exception calling status change handler")
 
-    def subscribe_data_change(self, nodes, attr=ua.AttributeIds.Value):
+    def subscribe_data_change(self, nodes, attr=ua.AttributeIds.Value, queuesize=0):
         """
         Subscribe for data change events for a node or list of nodes.
         default attribute is Value.
         Return a handle which can be used to unsubscribe
         If more control is necessary use create_monitored_items method
         """
-        return self._subscribe(nodes, attr, queuesize=0)
+        return self._subscribe(nodes, attr, queuesize=queuesize)
 
     def subscribe_events(self, sourcenode=ua.ObjectIds.Server, evtypes=ua.ObjectIds.BaseEventType, evfilter=None, queuesize=0):
         """

@@ -46,12 +46,12 @@ class XmlImporter(object):
             aliases_mapped[alias] = self.to_nodeid(node_id)
         return aliases_mapped
 
-    def import_xml(self, xmlpath):
+    def import_xml(self, xmlpath=None, xmlstring=None):
         """
         import xml and return added nodes
         """
         self.logger.info("Importing XML file %s", xmlpath)
-        self.parser = xmlparser.XMLParser(xmlpath)
+        self.parser = xmlparser.XMLParser(xmlpath, xmlstring)
 
         self.namespaces = self._map_namespaces(self.parser.get_used_namespaces())
         self.aliases = self._map_aliases(self.parser.get_aliases())
@@ -72,7 +72,8 @@ class XmlImporter(object):
 
         self.refs, remaining_refs = [], self.refs
         self._add_references(remaining_refs)
-        assert len(self.refs) == 0, self.refs
+        if len(self.refs) != 0:
+            self.logger.warning("The following references could not be imported and are probaly broken: %s", self.refs) 
 
         return nodes
 
@@ -400,7 +401,6 @@ class XmlImporter(object):
             ref.IsForward = data.forward
             ref.ReferenceTypeId = self.to_nodeid(data.reftype)
             ref.SourceNodeId = self._migrate_ns(obj.nodeid)
-            ref.TargetNodeClass = ua.NodeClass.DataType
             ref.TargetNodeId = self.to_nodeid(data.target)
             refs.append(ref)
         self._add_references(refs)

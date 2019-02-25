@@ -12,6 +12,7 @@ from opcua import ua
 from opcua.ua import object_ids as o_ids
 from opcua.common.ua_utils import get_base_data_type
 from opcua.ua.uatypes import extension_object_ids
+from opcua.ua.uaerrors import UaError
 
 
 class XmlExporter(object):
@@ -94,7 +95,12 @@ class XmlExporter(object):
         idxs = []
         for node in nodes:
             node_idxs = [node.nodeid.NamespaceIndex]
-            node_idxs.append(node.get_browse_name().NamespaceIndex)
+            try:
+                node_idxs.append(node.get_browse_name().NamespaceIndex)
+            except UaError:
+                self.logger.exception("Error retrieving browse name of node %s", node)
+                raise
+
             node_idxs.extend(ref.NodeId.NamespaceIndex for ref in node.get_references())
             node_idxs = list(set(node_idxs))  # remove duplicates
             for i in node_idxs:
@@ -123,7 +129,7 @@ class XmlExporter(object):
         # from IPython import embed
         # embed()
         if pretty:
-            self.indent(self.etree.getroot())
+            indent(self.etree.getroot())
             self.etree.write(xmlpath,
                              encoding='utf-8',
                              xml_declaration=True
@@ -447,22 +453,22 @@ class XmlExporter(object):
 
         return member_keys
 
-    def indent(self, elem, level=0):
-        """
-        copy and paste from http://effbot.org/zone/element-lib.htm#prettyprint
-        it basically walks your tree and adds spaces and newlines so the tree is
-        printed in a nice way
-        """
-        i = "\n" + level * "  "
-        if len(elem):
-            if not elem.text or not elem.text.strip():
-                elem.text = i + "  "
-            if not elem.tail or not elem.tail.strip():
-                elem.tail = i
-            for elem in elem:
-                self.indent(elem, level + 1)
-            if not elem.tail or not elem.tail.strip():
-                elem.tail = i
-        else:
-            if level and (not elem.tail or not elem.tail.strip()):
-                elem.tail = i
+def indent(elem, level=0):
+    """
+    copy and paste from http://effbot.org/zone/element-lib.htm#prettyprint
+    it basically walks your tree and adds spaces and newlines so the tree is
+    printed in a nice way
+    """
+    i = "\n" + level * "  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + "  "
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+        for elem in elem:
+            indent(elem, level + 1)
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = i
